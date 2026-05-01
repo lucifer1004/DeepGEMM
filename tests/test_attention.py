@@ -253,7 +253,7 @@ def test_paged_mqa_logits():
 
     def enumerate_paged_mqa_logits():
         arch_major = get_arch_major()
-        for is_varlen in ((True, False) if arch_major == 10 else (False, )):
+        for is_varlen in ((True, False) if arch_major in (10, 12) else (False, )):
             for is_fp4 in ((True, False) if arch_major == 10 else (False, )):
                 for logits_dtype in (torch.float, torch.bfloat16):
                     for block_kv in ((32, 64) if arch_major == 10 else (64, )):
