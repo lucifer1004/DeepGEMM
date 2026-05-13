@@ -220,7 +220,7 @@ static torch::Tensor get_paged_mqa_logits_metadata(const torch::Tensor& context_
         DG_HOST_ASSERT(indices_tensor.scalar_type() == torch::kInt);
         smxx_paged_mqa_logits_metadata(context_lens, schedule_metadata, batch_size, next_n, block_kv, num_sms, is_context_lens_2d, true, indices_tensor.data_ptr<int>());
     } else if (arch_major == 9 or arch_major == 10 or arch_major == 12) {
-        DG_HOST_ASSERT(block_kv == 64 or (arch_major == 10 and block_kv == 32));
+        DG_HOST_ASSERT(block_kv == 64 or ((arch_major == 10 or arch_major == 12) and block_kv == 32));
         smxx_paged_mqa_logits_metadata(context_lens, schedule_metadata, batch_size, next_n, block_kv, num_sms, is_context_lens_2d, false, nullptr);
     } else {
         DG_HOST_UNREACHABLE("Unsupported architecture");
