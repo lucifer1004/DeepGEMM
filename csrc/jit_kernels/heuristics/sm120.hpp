@@ -108,6 +108,13 @@ struct SM120ArchSpec {
         for (int block_n : block_n_candidates) {
             if (block_n > 128 or block_n > mn_major_b_max_n)
                 continue;
+            // BLOCK_M=96 uses kNWarps=4 (kMWarps=2), which requires
+            // kNTiles = BLOCK_N / MMA_N (=8) to be divisible by 4, i.e.
+            // BLOCK_N >= 32. The small-N swap-AB path emits BLOCK_N ∈
+            // {16, 32}, which would otherwise let BM=96+BN=16 reach NVCC
+            // and trip the "N tiles must divide evenly" static_assert.
+            if (block_m == 96 and block_n < 32)
+                continue;
 
             const auto layout = Layout{0, block_m, block_n, block_k, 1, 1};
             const auto storage_config = get_storage_config(desc, layout);
