@@ -20,28 +20,50 @@ struct SM120ArchSpec {
 
         // BLOCK_M candidates: smaller values reduce grouped-GEMM padding at
         // small expected_m (MoE decode), larger values amortize launch
-        // overhead at prefill. Kernel constraints:
-        //   * BLOCK_M must be a multiple of MMA_M=16
-        //   * Cooperative warp layout uses kMWarps=4 (kNWarps=2 hardcoded
-        //     in the kernel), so kMTilesPerWarp = BLOCK_M/4/16 must be ≥1
-        //     ⇒ BLOCK_M ≥ 64
+        // overhead at prefill. Kernel constraints (sm120_fp8_fp4_gemm_1d1d.cuh
+        // and sm120_fp8_gemm_1d1d.cuh):
+        //   * kNumMathThreads=256 → kNumMathWarps=8
+        //   * BLOCK_M must equal kMWarps × kMTilesPerWarp × MMA_M with
+        //     MMA_M=16 and kNumMathWarps = kMWarps × kNWarps
+        //   * The dispatcher picks kNWarps={2,4} based on BLOCK_M:
+        //       - BLOCK_M % 64 == 0 → kNWarps=2 (kMWarps=4): step=64
+        //       - else BLOCK_M % 32 == 0 → kNWarps=4 (kMWarps=2): step=32
+        //     Valid BLOCK_M ∈ {64, 96, 128, 160, 192, 224, ...}.
         //   * Plus the caller's runtime alignment cap and expected_m fit
         const int expected_m = desc.get_expected_m();
         const int runtime_align = heuristics_runtime->get_mk_alignment_for_contiguous_layout();
         constexpr int kMinBlockM = 64;
+        // Valid step in M: any value divisible by 32 (covers both kNWarps=2
+        // step-64 and kNWarps=4 step-32 paths).
+        constexpr int kBlockMStep = 32;
         std::vector<int> block_m_candidates;
-        for (int bm : {64, 128}) {
+        // For MGroupedContiguous, BLOCK_M must DIVIDE runtime_align — the
+        // caller pads each expert's M-slice to a multiple of runtime_align,
+        // and the scheduler tiles M in BLOCK_M strides starting from expert
+        // boundaries. If BLOCK_M doesn't divide runtime_align, a tile can
+        // straddle two experts, mixing their data → catastrophic numerical
+        // error (observed: BM=64 with align=96 → diff 0.08 on FP8 ue8m0).
+        const bool needs_align_divisibility =
+            (desc.gemm_type == GemmType::MGroupedContiguous or
+             desc.gemm_type == GemmType::MGroupedContiguousWithPsumLayout) and
+            runtime_align > 0;
+        // Three sizes worth considering across MoE workloads:
+        //   64  — snug for expected_m ≤ 64 (decode and small prefill)
+        //   96  — snug for expected_m ∈ [65, 96] (mid-prefill MoE band)
+        //   128 — snug for expected_m ∈ [97, 128] (typical prefill)
+        for (int bm : {64, 96, 128}) {
             if (runtime_align > 0 and bm > runtime_align)
+                continue;
+            if (needs_align_divisibility and runtime_align % bm != 0)
                 continue;
             if (expected_m > 0 and bm > expected_m and bm > kMinBlockM)
                 continue;
             block_m_candidates.push_back(bm);
         }
-        // Allow runtime_align itself as a candidate if it's a valid
-        // BLOCK_M (multiple of MMA_M=16, ≥ kMinBlockM, ≤128) and not
-        // already in the list (e.g., 80, 96, 112 from the theoretical
-        // helper's MMA_M-stepped sequence).
-        if (runtime_align >= kMinBlockM and runtime_align <= 128 and runtime_align % 16 == 0
+        // Allow runtime_align itself as a candidate if it satisfies the
+        // kernel's cooperative-warp divisibility (% kBlockMStep) and is in
+        // [64, 128].
+        if (runtime_align >= kMinBlockM and runtime_align <= 128 and runtime_align % kBlockMStep == 0
             and std::find(block_m_candidates.begin(), block_m_candidates.end(), runtime_align) == block_m_candidates.end()) {
             block_m_candidates.push_back(runtime_align);
         }
@@ -159,9 +181,14 @@ struct SM120ArchSpec {
         const int smem_d_full = get_smem_d_size_for_swizzle(desc, layout, swizzle_mode_cd, layout.block_m);
         const int stages_full = std::min((smem_capacity - smem_barriers - smem_d_full) / per_stage, kNumMaxStages);
 
+        // Sub-tile is only valid when it divides BLOCK_M evenly. The TMA-store
+        // epilogue computes kNumEpiMSubs = BLOCK_M / kEpiSubM via integer
+        // division — a non-divisor leaves the tail rows unwritten (BLOCK_M=96
+        // with store_m=64 silently drops rows 64-95).
         int store_m = layout.block_m;
         constexpr int kSubTileM = 64;
-        if (swizzle_mode_cd > 0 and layout.block_m > kSubTileM) {
+        if (swizzle_mode_cd > 0 and layout.block_m > kSubTileM
+            and layout.block_m % kSubTileM == 0) {
             const int smem_d_sub = get_smem_d_size_for_swizzle(desc, layout, swizzle_mode_cd, kSubTileM);
             const int stages_sub = std::min((smem_capacity - smem_barriers - smem_d_sub) / per_stage, kNumMaxStages);
             if (stages_sub > stages_full)

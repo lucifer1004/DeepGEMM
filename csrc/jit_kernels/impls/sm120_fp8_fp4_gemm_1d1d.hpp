@@ -45,6 +45,15 @@ public:
     };
 
     static std::string generate_impl(const Args& args) {
+        // Cooperative warp partition. The kernel asserts BLOCK_M divisible by
+        // kMWarps×MMA_M=16, where kMWarps = kNumMathWarps / kNWarps. With
+        // kNumMathThreads=256 (8 math warps), kNWarps=2 → kMWarps=4 → step=64
+        // (valid BLOCK_M ∈ {64,128,192,...}); kNWarps=4 → kMWarps=2 → step=32
+        // (additionally enables BLOCK_M ∈ {96,160,224,...}). Pick the smallest
+        // kNWarps that satisfies divisibility, since smaller kNWarps gives a
+        // larger kNTilesPerWarp (better A-fragment reuse across N).
+        const uint32_t block_m = args.gemm_config.layout.block_m;
+        const uint32_t k_n_warps = (block_m % 64 == 0) ? 2u : 4u;
         return fmt::format(R"(
 #include <deep_gemm/impls/sm120_fp8_fp4_gemm_1d1d.cuh>
 
@@ -62,6 +71,7 @@ static void __instantiate_kernel() {{
         {}, {},
         {},
         {}, {},
+        {},
         {},
         {},
         {},
@@ -90,7 +100,8 @@ static void __instantiate_kernel() {{
         args.b_is_fp4 ? "true" : "false",
         (args.gemm_desc.major_b == cute::UMMA::Major::K) ? "true" : "false",
         args.k_grouped_constant_stride ? "true" : "false",
-        args.gemm_config.storage_config.store_block_m);
+        args.gemm_config.storage_config.store_block_m,
+        k_n_warps);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {

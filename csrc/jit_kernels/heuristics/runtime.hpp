@@ -49,12 +49,35 @@ public:
         if (arch_major != 10 and arch_major != 12)
             return kLegacyMKAlignmentForContiguousLayout;
 
-        // SM120's grouped FP8/FP4 kernel uses 4 M-warps × MMA_M=16, so
-        // BLOCK_M ≥ 64. SM100 supports the full 32..max range.
-        // Stepping in MMA_M=16 increments lets the kernel pick an exact
-        // fit (e.g. 64, 80, 96, 112, 128) for the given expected_m.
-        int block_m = arch_major == 12 ? 128 : 240;
-        int min_block_m = arch_major == 12 ? 64 : 32;
+        // SM120: data-driven smart pick (see DeepGEMM/tests/sm120/
+        // bench_block_m_full_sweep.py). The cycle-model autotuner consistently
+        // over-prefers BLOCK_M=128, but measurements show that:
+        //   - BLOCK_M=64 wins for em ≤ 64 (snug fit, no padding)
+        //   - BLOCK_M=96 wins for em ∈ [65, 80] (kNWarps=4 path is intrinsically
+        //     ~25% faster per padded-FLOP than kNWarps=2, and the snugger fit
+        //     vs BLOCK_M=128 compounds the gain)
+        //   - BLOCK_M=64 wins for em > 80 (smaller blocks → more pipeline
+        //     stages → better TMA overlap; the cycle-model's amortization
+        //     argument for BLOCK_M=128 doesn't survive measurement)
+        // Aggregate across the bench: +6.5% real-TFLOPS vs the
+        // "largest-BM-that-fits" rule, within 0.6% of the per-config oracle.
+        //
+        // SM100: original "largest BM that fits" rule (the SM100 kernel
+        // dispatches grouped-contiguous through swap-AB, which has different
+        // amortization characteristics than SM120's direct path).
+        if (arch_major == 12) {
+            if (not expected_m.has_value())
+                return 64;
+            const int em = expected_m.value();
+            if (em <= 64)
+                return 64;
+            if (em <= 80)
+                return 96;
+            return 64;
+        }
+        // SM100 path (unchanged)
+        int block_m = 240;
+        int min_block_m = 32;
         int mma_step = 16;
         if (expected_m.has_value()) {
             for (; block_m > min_block_m and block_m - mma_step >= expected_m.value(); block_m -= mma_step);

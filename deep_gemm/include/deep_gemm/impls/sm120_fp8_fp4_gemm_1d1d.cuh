@@ -42,7 +42,13 @@ template <uint32_t SHAPE_M, uint32_t SHAPE_N, uint32_t SHAPE_K,
           bool kBIsFP4 = false,
           bool kBKMajor = true,
           bool kKGroupedConstantStride = false,
-          uint32_t kEpiSubM = BLOCK_M>
+          uint32_t kEpiSubM = BLOCK_M,
+          // Cooperative warp partition. kNWarps × kMWarps = kNumMathWarps.
+          // Default kNWarps=2 matches the original layout (kMWarps=4 for
+          // kNumMathThreads=256). For BLOCK_M values that don't divide
+          // evenly by kMWarps×MMA_M, the dispatcher passes a different
+          // kNWarps (e.g., 4 → kMWarps=2 enables BLOCK_M=96).
+          uint32_t kNWarps = 2>
 CUTLASS_GLOBAL __launch_bounds__(kNumTMAThreads + kNumMathThreads, 1) void
 sm120_fp8_fp4_gemm_1d1d_impl(cd_dtype_t* gmem_d, const cd_dtype_t* gmem_c,
                              __nv_fp8_e4m3* gmem_a_ptr, __nv_fp8_e4m3* gmem_b_ptr,
@@ -80,16 +86,21 @@ sm120_fp8_fp4_gemm_1d1d_impl(cd_dtype_t* gmem_d, const cd_dtype_t* gmem_c,
     static constexpr uint32_t kNTiles = BLOCK_N / MMA_N;
     static constexpr uint32_t kKSteps = BLOCK_K / MMA_K;
 
-    // Cooperative warp layout: warps split across M and N dimensions
-    static constexpr uint32_t kNWarps = 2;
+    // Cooperative warp layout: warps split across M and N dimensions.
+    // kNWarps is a template parameter (default 2 → kMWarps=4, the original
+    // layout). The heuristic passes kNWarps=4 (→ kMWarps=2) when BLOCK_M is
+    // not divisible by kMWarps×MMA_M for kMWarps=4, e.g. BLOCK_M=96 needs
+    // kMWarps=2 (96/2/16=3 tiles per warp).
     static constexpr uint32_t kMWarps = kNumMathWarps / kNWarps;
     static constexpr uint32_t kMTilesPerWarp = BLOCK_M / kMWarps / MMA_M;
     static constexpr uint32_t kNTilesPerWarp = kNTiles / kNWarps;
     static constexpr uint32_t kAccumPerWarp = kMTilesPerWarp * kNTilesPerWarp * MMA_ACCUM;
 
+    DG_STATIC_ASSERT(kNumMathWarps % kNWarps == 0, "kNWarps must divide kNumMathWarps");
     DG_STATIC_ASSERT(BLOCK_M == kMWarps * kMTilesPerWarp * MMA_M, "M tiles must divide evenly");
     DG_STATIC_ASSERT(kNTiles % kNWarps == 0, "N tiles must divide evenly among N warps");
     DG_STATIC_ASSERT(not kBKMajor or kNTilesPerWarp >= 1, "Need at least 1 N-tile per warp");
+    DG_STATIC_ASSERT(kMTilesPerWarp >= 1, "Need at least 1 M-tile per warp");
 
     static constexpr uint32_t kTMARegisters = 40;
     static constexpr uint32_t kMMARegisters = 232;
