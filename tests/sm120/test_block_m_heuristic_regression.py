@@ -71,29 +71,55 @@ def test_theoretical_alignment_returns_kernel_valid_block_m(expected_m):
     )
 
 
-def test_theoretical_alignment_picks_64_for_small_m():
-    """expected_m ≤ 64 picks BM=64 (snug, no padding)."""
+def test_theoretical_alignment_per_expert_em_le_64():
+    """Per-expert em ≤ 64: BM=64 (snug, 100% bench win)."""
+    # With num_groups omitted, expected_m is treated as per-expert em.
     assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(6) == 64
     assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(64) == 64
+    # With num_groups: ceil(640/16) = 40 per-expert → BM=64.
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(640, 16) == 64
 
 
-def test_theoretical_alignment_picks_96_for_narrow_midband():
-    """Data-driven smart pick: expected_m ∈ [65, 80] picks BM=96 (kNWarps=4 wins
-    intrinsically in this band; see bench_block_m_full_sweep.py)."""
+def test_theoretical_alignment_per_expert_em_65_to_96():
+    """Per-expert em ∈ [65, 96]: BM=96 (snug single tile, kNWarps=4 path)."""
     assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(65) == 96
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(72) == 96
     assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(80) == 96
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(96) == 96
+    # 65 × 32 = 2080 total with 32 experts → per-expert 65 → BM=96
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(2080, 32) == 96
 
 
-def test_theoretical_alignment_picks_64_for_large_m():
-    """Beyond the narrow [65, 80] BM=96 band, BM=64 wins again — smaller blocks
-    enable more pipeline stages, beating BM=128's amortization argument
-    (measured: BM=128 is best in only 2.8% of configs)."""
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(81) == 64
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(96) == 64
+def test_theoretical_alignment_per_expert_em_97_to_128():
+    """Per-expert em ∈ [97, 128]: BM=64 wins ~83% (2 tiles of 64 vs 2 tiles of 96 padded)."""
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(97) == 64
     assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(128) == 64
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(200) == 64
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(1000) == 64
+    # 128 × 64 = 8192 total with 64 experts → per-expert 128 → BM=64
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(8192, 64) == 64
+
+
+def test_theoretical_alignment_per_expert_em_gt_128():
+    """Per-expert em > 128: BM=96 wins (kNWarps=4 intrinsic efficiency dominates)."""
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(200) == 96
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(1000) == 96
+    # DSv4-Flash prefill (M=8000, topk=8) at TP=4: 64000 / 64 = 1000 per-expert → BM=96
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(64000, 64) == 96
+    # TP=2: 64000 / 128 = 500 → BM=96
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(64000, 128) == 96
+    # TP=8: 64000 / 32 = 2000 → BM=96
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(64000, 32) == 96
+
+
+def test_theoretical_alignment_decode_small_batch_with_num_groups():
+    """Decode at small batch: even if total em looks moderate, per-expert is tiny → BM=64.
+
+    Regression case the previous heuristic missed: decode B=32, topk=8 → total em=256.
+    Without num_groups, treated as per-expert 256 → BM=96 (wrong; per-expert ≈ 4 for
+    TP=4 with 64 experts). With num_groups, picks BM=64 correctly.
+    """
+    # Decode B=32 at TP=4: total em=256, 64 experts, per-expert=4 → BM=64
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(256, 64) == 64
+    # Decode B=256 at TP=4: total em=2048, 64 experts, per-expert=32 → BM=64
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(2048, 64) == 64
 
 
 @pytest.mark.parametrize("runtime_align", [80, 96, 112])

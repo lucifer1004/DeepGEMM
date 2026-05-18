@@ -279,8 +279,17 @@ struct SM120ArchSpec {
         const double a_reuse = static_cast<double>(layout.block_n) / 8.0;
         double mma_efficiency = 0.69 + 0.12 * std::min(1.0, (a_reuse - 4.0) / 12.0);
 
+        // Per-BM kernel-path efficiency factor. BLOCK_M values not divisible
+        // by 64 use the kNWarps=4 (kMWarps=2) cooperative warp layout, which
+        // is intrinsically faster per padded-FLOP than the kNWarps=2 path
+        // (BM divisible by 64). Median kernel-TFLOPS ratio (BM=96 / BM=64)
+        // measured across 1026 configs is 1.26 (see
+        // DeepGEMM/tests/sm120/bench_block_m_full_sweep.py). Without this
+        // factor the cycle model under-weights BM=96 and over-prefers BM=128.
+        const double kernel_eff_factor = (layout.block_m % 64 == 0) ? 1.0 : 1.26;
+
         const double peak_flops_per_ns = (desc.a_dtype == at::kBFloat16) ? 380000.0 : 762000.0;
-        double block_ns = flops_per_block / (peak_flops_per_ns * mma_efficiency);
+        double block_ns = flops_per_block / (peak_flops_per_ns * mma_efficiency * kernel_eff_factor);
 
         float wave_efficiency = static_cast<float>(num_blocks) / (num_waves * desc.num_sms);
         int64_t num_cycles = static_cast<int64_t>(block_ns * num_blocks / wave_efficiency);

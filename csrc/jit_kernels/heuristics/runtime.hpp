@@ -44,23 +44,28 @@ public:
         return mk_alignment_for_contiguous_layout;
     }
 
-    static int get_theoretical_mk_alignment_for_contiguous_layout(const std::optional<int>& expected_m) {
+    static int get_theoretical_mk_alignment_for_contiguous_layout(
+            const std::optional<int>& expected_m,
+            const std::optional<int>& num_groups = std::nullopt) {
         const auto arch_major = device_runtime->get_arch_major();
         if (arch_major != 10 and arch_major != 12)
             return kLegacyMKAlignmentForContiguousLayout;
 
-        // SM120: data-driven smart pick (see DeepGEMM/tests/sm120/
-        // bench_block_m_full_sweep.py). The cycle-model autotuner consistently
-        // over-prefers BLOCK_M=128, but measurements show that:
-        //   - BLOCK_M=64 wins for em ≤ 64 (snug fit, no padding)
-        //   - BLOCK_M=96 wins for em ∈ [65, 80] (kNWarps=4 path is intrinsically
-        //     ~25% faster per padded-FLOP than kNWarps=2, and the snugger fit
-        //     vs BLOCK_M=128 compounds the gain)
-        //   - BLOCK_M=64 wins for em > 80 (smaller blocks → more pipeline
-        //     stages → better TMA overlap; the cycle-model's amortization
-        //     argument for BLOCK_M=128 doesn't survive measurement)
-        // Aggregate across the bench: +6.5% real-TFLOPS vs the
-        // "largest-BM-that-fits" rule, within 0.6% of the per-config oracle.
+        // SM120 piecewise rule keyed on PER-EXPERT em (not total em). vllm
+        // passes `expected_m = M * num_topk` (sum across experts) and
+        // `num_groups = local_num_experts` (this rank's expert count); we
+        // divide to recover the per-expert workload. Without num_groups
+        // (legacy callers), expected_m is treated as already per-expert.
+        //
+        // Boundaries from the prefill-range bench
+        // (DeepGEMM/tests/sm120/bench_block_m_prefill_range.py, 1452 configs,
+        // per-expert em ∈ {32..4096}):
+        //   - em ≤ 64:   BM=64 wins ~100%   (snug fit, no padding)
+        //   - em ∈ [65, 96]: BM=96 wins majority (snug fit, kNWarps=4 path)
+        //   - em ∈ [97, 128]: BM=64 wins ~83% (2 tiles of 64 beat 1 tile of
+        //                    96 padded, despite kNWarps=4 advantage)
+        //   - em ≥ 256:  BM=96 wins ≥63%, climbing to 100% by em=1024
+        //                (kNWarps=4 intrinsic efficiency dominates)
         //
         // SM100: original "largest BM that fits" rule (the SM100 kernel
         // dispatches grouped-contiguous through swap-AB, which has different
@@ -69,11 +74,12 @@ public:
             if (not expected_m.has_value())
                 return 64;
             const int em = expected_m.value();
-            if (em <= 64)
-                return 64;
-            if (em <= 80)
-                return 96;
-            return 64;
+            const int ng = std::max(num_groups.value_or(1), 1);
+            const int per_expert_em = (em + ng - 1) / ng;  // ceil(em / ng)
+            if (per_expert_em <= 64)  return 64;
+            if (per_expert_em <= 96)  return 96;
+            if (per_expert_em <= 128) return 64;
+            return 96;
         }
         // SM100 path (unchanged)
         int block_m = 240;
