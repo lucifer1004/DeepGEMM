@@ -274,10 +274,26 @@ struct SM120ArchSpec {
 
         // Empirical warp-spec MMA efficiency model.
         // A reuse = BN/8 (each A fragment reused across N-tiles).
-        // Cooperative layout: larger BN reduces epilogue overhead (fewer tiles) and
-        // increases compute per K-block (better TMA latency amortization).
+        // B reuse = BM/8 (each B fragment reused across M-tiles, symmetric).
+        // Cooperative layout: larger BN reduces epilogue overhead (fewer tiles)
+        // and larger BM amortises B-operand fragment loads — both contribute
+        // independently, but the joint boost only fires when BOTH operands
+        // get enough reuse, so we compose multiplicatively. Old model used
+        // only a_reuse, which underweighted BM at large BN and let the
+        // dispatcher pick BM=64 over BM=128 at prefill (M ≥ ~8K), giving
+        // a 60% regression vs the BM=128 actual measurement.
+        //
+        // Boundary cases (preserved from the old model):
+        //   - BM=128, BN=128: 0.69 + 0.12·1·1 = 0.81
+        //   - BM=128, BN=32:  0.69 + 0.12·0·1 = 0.69
+        //   - BM=32,  BN=128: 0.69 + 0.12·1·0 = 0.69
+        // New cases:
+        //   - BM=64,  BN=128: 0.69 + 0.12·1·0.33 = 0.73 (was 0.81)
         const double a_reuse = static_cast<double>(layout.block_n) / 8.0;
-        double mma_efficiency = 0.69 + 0.12 * std::min(1.0, (a_reuse - 4.0) / 12.0);
+        const double b_reuse = static_cast<double>(layout.block_m) / 8.0;
+        const double a_factor = std::min(1.0, (a_reuse - 4.0) / 12.0);
+        const double b_factor = std::min(1.0, (b_reuse - 4.0) / 12.0);
+        double mma_efficiency = 0.69 + 0.12 * a_factor * b_factor;
 
         // Per-BM kernel-path efficiency factor. BLOCK_M values not divisible
         // by 64 use the kNWarps=4 (kMWarps=2) cooperative warp layout, which
