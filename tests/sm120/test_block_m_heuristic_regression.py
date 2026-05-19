@@ -48,9 +48,11 @@ _RTX_PRO_5000_BLACKWELL_SMS = 110
 # Union: BLOCK_M ∈ {64, 96, 128, 160, 192, 224, ...}, i.e. multiple of 32 ≥ 64.
 _KERNEL_BLOCK_M_STEP = 32
 _KERNEL_MIN_BLOCK_M = 64
-# Post-refactor + smart-pick: theoretical helper only ever returns 64 or 96
-# (data-driven; see bench_block_m_full_sweep.py). 128 is never the right pick.
-_THEORETICAL_VALID_BLOCK_M = (64, 96)
+# Theoretical helper returns 64 (decode regime) or 128 (prefill regime). The
+# old (64, 96) range was based on a sweep that compared BM=96 vs BM=64 only,
+# not against BM=128; the prefill bench at DSv4-Flash MoE shapes (N=4096,
+# K ∈ {2048, 4096}, G=64) shows BM=128 wins consistently for per-expert em > 64.
+_THEORETICAL_VALID_BLOCK_M = (64, 128)
 
 
 @pytest.mark.parametrize(
@@ -80,33 +82,25 @@ def test_theoretical_alignment_per_expert_em_le_64():
     assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(640, 16) == 64
 
 
-def test_theoretical_alignment_per_expert_em_65_to_96():
-    """Per-expert em ∈ [65, 96]: BM=96 (snug single tile, kNWarps=4 path)."""
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(65) == 96
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(80) == 96
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(96) == 96
-    # 65 × 32 = 2080 total with 32 experts → per-expert 65 → BM=96
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(2080, 32) == 96
+def test_theoretical_alignment_per_expert_em_gt_64():
+    """Per-expert em > 64: BM=128 wins.
 
-
-def test_theoretical_alignment_per_expert_em_97_to_128():
-    """Per-expert em ∈ [97, 128]: BM=64 wins ~83% (2 tiles of 64 vs 2 tiles of 96 padded)."""
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(97) == 64
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(128) == 64
-    # 128 × 64 = 8192 total with 64 experts → per-expert 128 → BM=64
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(8192, 64) == 64
-
-
-def test_theoretical_alignment_per_expert_em_gt_128():
-    """Per-expert em > 128: BM=96 wins (kNWarps=4 intrinsic efficiency dominates)."""
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(200) == 96
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(1000) == 96
-    # DSv4-Flash prefill (M=8000, topk=8) at TP=4: 64000 / 64 = 1000 per-expert → BM=96
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(64000, 64) == 96
-    # TP=2: 64000 / 128 = 500 → BM=96
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(64000, 128) == 96
-    # TP=8: 64000 / 32 = 2000 → BM=96
-    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(64000, 32) == 96
+    DSv4-Flash MoE prefill bench (N=4096, K ∈ {2048, 4096}, G=64) shows BM=128
+    beats BM=96 by 3-26% across the whole prefill range, and beats BM=64 by
+    24-44%. The previous heuristic returned 96 (or 64 for [97, 128]) because
+    its underlying sweep didn't include BM=128 in the candidate comparison.
+    """
+    # Just above the decode threshold
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(65) == 128
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(96) == 128
+    # Previously [97, 128] → 64 — now 128
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(128) == 128
+    # Production prefill (DSv4-Flash @ TP=4): M=8000, topk=8, G=64 → per-expert 1000
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(64000, 64) == 128
+    # TP=2: per-expert 500
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(64000, 128) == 128
+    # TP=8: per-expert 2000
+    assert deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(64000, 32) == 128
 
 
 def test_theoretical_alignment_decode_small_batch_with_num_groups():

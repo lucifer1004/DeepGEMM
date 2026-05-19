@@ -57,15 +57,22 @@ public:
         // divide to recover the per-expert workload. Without num_groups
         // (legacy callers), expected_m is treated as already per-expert.
         //
-        // Boundaries from the prefill-range bench
-        // (DeepGEMM/tests/sm120/bench_block_m_prefill_range.py, 1452 configs,
-        // per-expert em ∈ {32..4096}):
-        //   - em ≤ 64:   BM=64 wins ~100%   (snug fit, no padding)
-        //   - em ∈ [65, 96]: BM=96 wins majority (snug fit, kNWarps=4 path)
-        //   - em ∈ [97, 128]: BM=64 wins ~83% (2 tiles of 64 beat 1 tile of
-        //                    96 padded, despite kNWarps=4 advantage)
-        //   - em ≥ 256:  BM=96 wins ≥63%, climbing to 100% by em=1024
-        //                (kNWarps=4 intrinsic efficiency dominates)
+        // Boundaries (DSv4-Flash MoE shapes, N=4096, K ∈ {2048, 4096},
+        // G=64; per-expert em sweep on RTX PRO 6000 Blackwell):
+        //   - em ≤ 64:   BM=64  (decode-ish; small enough that BM=128's
+        //                        per-expert padding penalty dominates)
+        //   - em > 64:   BM=128 (BM=128 beats BM=96 by 3-26% across the
+        //                        whole prefill range, including at the
+        //                        boundary em=65-96 where the previous rule
+        //                        picked BM=96)
+        //
+        // History: an earlier version of this rule had a (BM=96, BM=64)
+        // bias for per-expert > 64 based on a 1026-config sweep that did
+        // NOT include BM=128 in the candidate set
+        // (DeepGEMM/tests/sm120/bench_block_m_full_sweep.py only swept
+        // {64, 96, 128} for BM but the BM=96-vs-BM=64 comparison was the
+        // headline). Once BM=128 was added to the SF-major-pivoted dispatch
+        // (01fcd4c .. 64b1ac9) the prefill regression became apparent.
         //
         // SM100: original "largest BM that fits" rule (the SM100 kernel
         // dispatches grouped-contiguous through swap-AB, which has different
@@ -76,10 +83,8 @@ public:
             const int em = expected_m.value();
             const int ng = std::max(num_groups.value_or(1), 1);
             const int per_expert_em = (em + ng - 1) / ng;  // ceil(em / ng)
-            if (per_expert_em <= 64)  return 64;
-            if (per_expert_em <= 96)  return 96;
-            if (per_expert_em <= 128) return 64;
-            return 96;
+            if (per_expert_em <= 64) return 64;
+            return 128;
         }
         // SM100 path (unchanged)
         int block_m = 240;
