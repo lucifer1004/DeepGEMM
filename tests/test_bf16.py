@@ -313,7 +313,7 @@ def test_cublaslt_batched_symm() -> None:
     print()
 
 
-def test_sm120_regressions() -> None:
+def test_sm120_small_n_output_row_stride_and_accumulation() -> None:
     if get_arch_major() != 12:
         return
     old_sms = deep_gemm.get_num_sms()
@@ -340,6 +340,19 @@ def test_sm120_regressions() -> None:
                         assert torch.all(storage[[0, -1]] == -7)
                         assert torch.all(storage[1:65, n:] == -7)
                         assert torch.equal(c_storage, before_c)
+    finally:
+        deep_gemm.set_num_sms(old_sms)
+        deep_gemm.set_mk_alignment_for_contiguous_layout(old_alignment)
+
+
+def test_sm120_contiguous_grouped_output_row_stride() -> None:
+    if get_arch_major() != 12:
+        return
+    old_sms = deep_gemm.get_num_sms()
+    old_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout()
+    deep_gemm.use_deterministic_algorithms(True)
+    try:
+        deep_gemm.set_num_sms(2)
         for padding in (0, 8):
             a = torch.ones((128, 128), dtype=torch.bfloat16, device='cuda')
             b = torch.ones((1, 16, 128), dtype=torch.bfloat16, device='cuda')
@@ -351,6 +364,19 @@ def test_sm120_regressions() -> None:
             assert torch.all(d == 128)
             assert torch.all(storage[[0, -1]] == -7)
             assert torch.all(storage[1:129, 16:] == -7)
+    finally:
+        deep_gemm.set_num_sms(old_sms)
+        deep_gemm.set_mk_alignment_for_contiguous_layout(old_alignment)
+
+
+def test_sm120_kgroup_unequal_k_accumulation() -> None:
+    if get_arch_major() != 12:
+        return
+    old_sms = deep_gemm.get_num_sms()
+    old_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout()
+    deep_gemm.use_deterministic_algorithms(True)
+    try:
+        deep_gemm.set_mk_alignment_for_contiguous_layout(128)
         deep_gemm.set_num_sms(8)
         ks = [128, 256]
         a = torch.cat([torch.full((k, 128), i + 1, dtype=torch.bfloat16, device='cuda') for i, k in enumerate(ks)])
@@ -365,7 +391,7 @@ def test_sm120_regressions() -> None:
         deep_gemm.set_mk_alignment_for_contiguous_layout(old_alignment)
 
 
-def test_sm120_masked_boundary() -> None:
+def test_sm120_masked_physical_capacity() -> None:
     if get_arch_major() != 12:
         return
     old_sms, old_pdl = deep_gemm.get_num_sms(), deep_gemm.get_pdl()
@@ -406,7 +432,7 @@ def test_sm120_masked_boundary() -> None:
         deep_gemm.set_block_size_multiple_of((1, 1))
 
 
-def test_sm120_kgroup_boundaries() -> None:
+def test_sm120_kgroup_zero_and_unequal_k() -> None:
     if get_arch_major() != 12:
         return
     old_sms = deep_gemm.get_num_sms()
@@ -432,7 +458,7 @@ def test_sm120_kgroup_boundaries() -> None:
         deep_gemm.set_mk_alignment_for_contiguous_layout(old_alignment)
 
 
-def test_sm120_kgroup_random_default_sms() -> None:
+def test_sm120_kgroup_descriptor_reuse_at_default_sms() -> None:
     if get_arch_major() != 12:
         return
     old_sms = deep_gemm.get_num_sms()
@@ -472,10 +498,12 @@ def test_sm120_kgroup_random_default_sms() -> None:
 
 
 if __name__ == '__main__':
-    test_sm120_kgroup_random_default_sms()
-    test_sm120_kgroup_boundaries()
-    test_sm120_regressions()
-    test_sm120_masked_boundary()
+    test_sm120_kgroup_descriptor_reuse_at_default_sms()
+    test_sm120_kgroup_zero_and_unequal_k()
+    test_sm120_small_n_output_row_stride_and_accumulation()
+    test_sm120_contiguous_grouped_output_row_stride()
+    test_sm120_kgroup_unequal_k_accumulation()
+    test_sm120_masked_physical_capacity()
     torch.manual_seed(0)
     random.seed(0)
 

@@ -244,7 +244,7 @@ def test_fp8_bhd_bhr_hdr(use_ue8m0: bool = True):
     print()
 
 
-def test_sm120_regressions() -> None:
+def test_sm120_batched_output_row_stride() -> None:
     if get_arch_major() != 12:
         return
     old_sms = deep_gemm.get_num_sms()
@@ -264,6 +264,17 @@ def test_sm120_regressions() -> None:
                 assert torch.all(d[:, 1] == 256)
                 assert torch.all(storage[[0, -1]] == -7)
                 assert torch.all(storage[1:129, :, 32:] == -7)
+    finally:
+        deep_gemm.set_num_sms(old_sms)
+
+
+def test_sm120_reduction_empty_dimensions_and_fp32_accumulation_contract() -> None:
+    if get_arch_major() != 12:
+        return
+    old_sms = deep_gemm.get_num_sms()
+    deep_gemm.use_deterministic_algorithms(True)
+    try:
+        deep_gemm.set_num_sms(2)
         for m, n in ((0, 128), (128, 0), (128, 128)):
             a = torch.ones((1, m, 128), dtype=torch.bfloat16, device='cuda')
             b = torch.ones((1, n, 128), dtype=torch.bfloat16, device='cuda')
@@ -286,7 +297,8 @@ def test_sm120_regressions() -> None:
 
 
 if __name__ == '__main__':
-    test_sm120_regressions()
+    test_sm120_batched_output_row_stride()
+    test_sm120_reduction_empty_dimensions_and_fp32_accumulation_contract()
     torch.manual_seed(0)
     random.seed(0)
 

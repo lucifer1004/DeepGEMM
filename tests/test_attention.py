@@ -912,13 +912,13 @@ _SKIP_HEAD_CASES = [
 ]
 
 
-def _skip_head_inputs(n, k, splits, out_dtype, mixed_sf=False):
+def _skip_head_inputs(n, k, splits, out_dtype, fp32_b_scale=False):
     a = torch.ones((1, k), device='cuda').to(torch.float8_e4m3fn)
     b = torch.ones((n, k), device='cuda').to(torch.float8_e4m3fn)
     sfa = deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(
         torch.ones((1, k // 128), device='cuda'))
     sfb = torch.ones((n, k // 128), device='cuda')
-    if not mixed_sf:
+    if not fp32_b_scale:
         sfb = deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(sfb)
     left, mid, right = splits
     heads = n // (left + right)
@@ -940,7 +940,7 @@ def _assert_skip_head_output(d, storage, expected):
 
 @pytest.mark.parametrize('out_dtype', [torch.bfloat16, torch.float32], ids=['bf16', 'fp32'])
 @pytest.mark.parametrize('n,k,splits,sms,expected_split', _SKIP_HEAD_CASES)
-def test_sm120_skip_head_mid_exact(n, k, splits, sms, expected_split, out_dtype):
+def test_sm120_skip_head_output_mapping_and_middle_preservation(n, k, splits, sms, expected_split, out_dtype):
     if get_arch_major() != 12:
         pytest.skip('SM120 epilogue regression')
     original_sms = deep_gemm.get_num_sms()
@@ -978,13 +978,13 @@ def test_sm120_skip_head_mid_exact(n, k, splits, sms, expected_split, out_dtype)
 
 
 @pytest.mark.parametrize('out_dtype', [torch.bfloat16, torch.float32], ids=['bf16', 'fp32'])
-def test_sm120_skip_head_mid_reject_mixed_sf(out_dtype):
+def test_sm120_skip_head_reject_fp32_scale_without_cast(out_dtype):
     if get_arch_major() != 12:
         pytest.skip('SM120 scaling factor contract')
     original_sms = deep_gemm.get_num_sms()
     try:
         deep_gemm.set_num_sms(2)
-        a, b, d, storage, _ = _skip_head_inputs(256, 512, (128, 64, 128), out_dtype, mixed_sf=True)
+        a, b, d, storage, _ = _skip_head_inputs(256, 512, (128, 64, 128), out_dtype, fp32_b_scale=True)
         torch.cuda.synchronize()
         before = storage.cpu().clone()
         with pytest.raises(RuntimeError, match=r'(?is)Assertion error.*(scalar_type|dtype|scaling|sfb)'):

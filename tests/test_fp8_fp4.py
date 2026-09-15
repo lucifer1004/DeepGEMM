@@ -367,18 +367,18 @@ def test_k_grouped_gemm_contiguous() -> None:
     print()
 
 
-def test_sm120_regressions() -> None:
+def _constant_fp8_fp4_with_unit_scales(shape, value=1, gran_k=128, fp4=False):
+    data = torch.full((*shape[:-1], shape[-1] // 2), 0x22, dtype=torch.int8, device='cuda') if fp4 else \
+        torch.full(shape, value, dtype=torch.float32, device='cuda').to(torch.float8_e4m3fn)
+    sf = torch.ones((*shape[:-1], (shape[-1] + gran_k - 1) // gran_k), dtype=torch.float32, device='cuda')
+    return data, sf
+
+
+def test_sm120_split_k_accumulation() -> None:
     if get_arch_major() != 12:
         return
     old_sms = deep_gemm.get_num_sms()
-    old_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout()
-
-    def quant(shape, value=1, gran_k=128, fp4=False):
-        data = torch.full((*shape[:-1], shape[-1] // 2), 0x22, dtype=torch.int8, device='cuda') if fp4 else \
-            torch.full(shape, value, dtype=torch.float32, device='cuda').to(torch.float8_e4m3fn)
-        sf = torch.ones((*shape[:-1], (shape[-1] + gran_k - 1) // gran_k), dtype=torch.float32, device='cuda')
-        return data, sf
-
+    quant = _constant_fp8_fp4_with_unit_scales
     try:
         for sms in (2, 8):
             deep_gemm.set_num_sms(sms)
@@ -397,6 +397,16 @@ def test_sm120_regressions() -> None:
                     assert torch.all(d == value * 4096 + (7 if c is not None else 0))
                     assert torch.all(storage[[0, -1]] == -7) and torch.all(storage[1:65, 64:] == -7)
                     assert torch.equal(c_storage, before_c)
+    finally:
+        deep_gemm.set_num_sms(old_sms)
+
+
+def test_sm120_mixed_fp8_fp4_scale_tile_k_tail() -> None:
+    if get_arch_major() != 12:
+        return
+    old_sms = deep_gemm.get_num_sms()
+    quant = _constant_fp8_fp4_with_unit_scales
+    try:
         deep_gemm.set_num_sms(2)
         for k in (128, 384, 640, 512):
             for fp4_a in (False, True):
@@ -405,6 +415,17 @@ def test_sm120_regressions() -> None:
                 d = torch.empty((64, 64), dtype=torch.bfloat16, device='cuda')
                 deep_gemm.fp8_fp4_gemm_nt(a, b, d, recipe_a=(1, 128), recipe_b=(1, 128))
                 assert torch.all(d == k)
+    finally:
+        deep_gemm.set_num_sms(old_sms)
+
+
+def test_sm120_dense_strided_output_and_accumulation() -> None:
+    if get_arch_major() != 12:
+        return
+    old_sms = deep_gemm.get_num_sms()
+    quant = _constant_fp8_fp4_with_unit_scales
+    try:
+        deep_gemm.set_num_sms(2)
         for n in (8, 9, 64):
             for value in (0, 1):
                 for accumulate in (False, True):
@@ -421,6 +442,17 @@ def test_sm120_regressions() -> None:
                     assert torch.all(d == value * 128 + (3 if accumulate else 0))
                     assert torch.all(storage[[0, -1]] == -7) and torch.all(storage[1:65, n:] == -7)
                     assert torch.equal(c_storage, before_c)
+    finally:
+        deep_gemm.set_num_sms(old_sms)
+
+
+def test_sm120_odd_n_bf16_output_and_accumulation() -> None:
+    if get_arch_major() != 12:
+        return
+    old_sms = deep_gemm.get_num_sms()
+    quant = _constant_fp8_fp4_with_unit_scales
+    try:
+        deep_gemm.set_num_sms(2)
         for n in (8, 9):
             for accumulate in (False, True):
                 a, b = quant((64, 128)), quant((n, 128))
@@ -430,6 +462,17 @@ def test_sm120_regressions() -> None:
                 deep_gemm.fp8_fp4_gemm_nt(a, b, d, c=d if accumulate else None, recipe=(1, 1, 128))
                 assert torch.all(d == (131 if accumulate else 128))
                 assert torch.all(storage[[0, -1]] == -7) and torch.all(storage[1:65, n:] == -7)
+    finally:
+        deep_gemm.set_num_sms(old_sms)
+
+
+def test_sm120_batched_strided_output_and_accumulation() -> None:
+    if get_arch_major() != 12:
+        return
+    old_sms = deep_gemm.get_num_sms()
+    quant = _constant_fp8_fp4_with_unit_scales
+    try:
+        deep_gemm.set_num_sms(2)
         for n in (16, 64):
             a = quant((64, 2, 128))
             b = quant((2, n, 128))
@@ -442,6 +485,18 @@ def test_sm120_regressions() -> None:
             assert torch.all(d == 131)
             assert torch.all(storage[[0, -1]] == -7) and torch.all(storage[1:65, :, n:] == -7)
             assert torch.equal(c_storage, before_c)
+    finally:
+        deep_gemm.set_num_sms(old_sms)
+
+
+def test_sm120_contiguous_grouped_output_row_stride() -> None:
+    if get_arch_major() != 12:
+        return
+    old_sms = deep_gemm.get_num_sms()
+    old_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout()
+    quant = _constant_fp8_fp4_with_unit_scales
+    try:
+        deep_gemm.set_num_sms(2)
         deep_gemm.set_mk_alignment_for_contiguous_layout(128)
         for padding in (0, 8):
             a, b = quant((128, 128)), quant((1, 16, 128))
@@ -451,6 +506,19 @@ def test_sm120_regressions() -> None:
             deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(a, b, d, labels, recipe=(1, 1, 128))
             assert torch.all(d == 128)
             assert torch.all(storage[[0, -1]] == -7) and torch.all(storage[1:129, 16:] == -7)
+    finally:
+        deep_gemm.set_num_sms(old_sms)
+        deep_gemm.set_mk_alignment_for_contiguous_layout(old_alignment)
+
+
+def test_sm120_kgroup_nt_tn_layouts_and_accumulation() -> None:
+    if get_arch_major() != 12:
+        return
+    old_sms = deep_gemm.get_num_sms()
+    old_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout()
+    quant = _constant_fp8_fp4_with_unit_scales
+    try:
+        deep_gemm.set_mk_alignment_for_contiguous_layout(128)
         deep_gemm.set_num_sms(8)
         ks = [128, 256]
         ap = [quant((128, k), i + 1) for i, k in enumerate(ks)]
@@ -469,6 +537,19 @@ def test_sm120_regressions() -> None:
             fn(a, b, d, ks, layout, d, recipe=(1, 1, 128))
             for i, k in enumerate(ks):
                 assert torch.all(d[i] == k * (i + 1) + 3)
+    finally:
+        deep_gemm.set_num_sms(old_sms)
+        deep_gemm.set_mk_alignment_for_contiguous_layout(old_alignment)
+
+
+def test_sm120_asymmetric_scale_recipe_swap() -> None:
+    if get_arch_major() != 12:
+        return
+    old_sms = deep_gemm.get_num_sms()
+    old_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout()
+    quant = _constant_fp8_fp4_with_unit_scales
+    try:
+        deep_gemm.set_mk_alignment_for_contiguous_layout(128)
         deep_gemm.set_num_sms(2)
         for accumulate in (False, True):
             a, b = quant((16, 128), gran_k=32), quant((128, 128))
@@ -476,6 +557,20 @@ def test_sm120_regressions() -> None:
             deep_gemm.fp8_fp4_gemm_nt(a, b, d, c=d if accumulate else None,
                                       recipe_a=(1, 32), recipe_b=(1, 128))
             assert torch.all(d == (131 if accumulate else 128))
+    finally:
+        deep_gemm.set_num_sms(old_sms)
+        deep_gemm.set_mk_alignment_for_contiguous_layout(old_alignment)
+
+
+def test_sm120_scale_dtype_validation() -> None:
+    if get_arch_major() != 12:
+        return
+    old_sms = deep_gemm.get_num_sms()
+    old_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout()
+    quant = _constant_fp8_fp4_with_unit_scales
+    try:
+        deep_gemm.set_num_sms(2)
+        deep_gemm.set_mk_alignment_for_contiguous_layout(128)
         for form in ('dense', 'grouped', 'masked'):
             for int_a, int_b in ((False, False), (True, False), (False, True), (True, True)):
                 for disable in (False, True):
@@ -506,7 +601,7 @@ def test_sm120_regressions() -> None:
         deep_gemm.set_mk_alignment_for_contiguous_layout(old_alignment)
 
 
-def test_sm120_masked_boundary() -> None:
+def test_sm120_masked_physical_capacity() -> None:
     if get_arch_major() != 12:
         return
     old_sms, old_pdl = deep_gemm.get_num_sms(), deep_gemm.get_pdl()
@@ -546,7 +641,7 @@ def test_sm120_masked_boundary() -> None:
         deep_gemm.set_pdl(old_pdl)
 
 
-def test_sm120_kgroup_boundaries() -> None:
+def test_sm120_kgroup_zero_and_unequal_k() -> None:
     if get_arch_major() != 12:
         return
     old_sms = deep_gemm.get_num_sms()
@@ -581,7 +676,7 @@ def test_sm120_kgroup_boundaries() -> None:
         deep_gemm.set_mk_alignment_for_contiguous_layout(old_alignment)
 
 
-def test_sm120_kgroup_random_default_sms() -> None:
+def test_sm120_kgroup_descriptor_reuse_at_default_sms() -> None:
     if get_arch_major() != 12:
         return
     old_sms = deep_gemm.get_num_sms()
@@ -623,10 +718,18 @@ def test_sm120_kgroup_random_default_sms() -> None:
 
 
 if __name__ == '__main__':
-    test_sm120_kgroup_random_default_sms()
-    test_sm120_kgroup_boundaries()
-    test_sm120_regressions()
-    test_sm120_masked_boundary()
+    test_sm120_kgroup_descriptor_reuse_at_default_sms()
+    test_sm120_kgroup_zero_and_unequal_k()
+    test_sm120_split_k_accumulation()
+    test_sm120_mixed_fp8_fp4_scale_tile_k_tail()
+    test_sm120_dense_strided_output_and_accumulation()
+    test_sm120_odd_n_bf16_output_and_accumulation()
+    test_sm120_batched_strided_output_and_accumulation()
+    test_sm120_contiguous_grouped_output_row_stride()
+    test_sm120_kgroup_nt_tn_layouts_and_accumulation()
+    test_sm120_asymmetric_scale_recipe_swap()
+    test_sm120_scale_dtype_validation()
+    test_sm120_masked_physical_capacity()
     torch.manual_seed(0)
     random.seed(0)
 

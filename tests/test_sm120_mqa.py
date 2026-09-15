@@ -56,7 +56,7 @@ def check_outputs(call, reference, valid):
 
 @pytest.mark.parametrize('head_dim', [32, 64, 128])
 @pytest.mark.parametrize('paged', [False, True])
-def test_fp8_mqa_layout(head_dim, paged):
+def test_fp8_mqa_logits_head_dimension_mapping(head_dim, paged):
     batch, heads, tokens = 4, 16, 256
     q_cpu = torch.randint(-2, 3, (batch, heads, head_dim)).float()
     kv_cpu = torch.randint(-2, 3, (tokens, head_dim)).float()
