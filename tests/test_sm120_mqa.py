@@ -1,17 +1,14 @@
 import bisect
 import itertools
+import random
 
 import pytest
 import torch
 
 import deep_gemm
-
-
-@pytest.fixture(autouse=True)
-def sm120():
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 12:
-        pytest.skip('SM120 required')
-    torch.manual_seed(0)
+from deep_gemm.testing import (
+    get_arch_major, test_filter
+)
 
 
 def metadata_reference(lengths, slots, indices=None):
@@ -54,6 +51,7 @@ def check_outputs(call, reference, valid):
         torch.testing.assert_close(captured[valid].double(), reference[valid], rtol=1e-5, atol=1e-5)
 
 
+@test_filter(lambda: get_arch_major() == 12)
 @pytest.mark.parametrize('head_dim', [32, 64, 128])
 @pytest.mark.parametrize('paged', [False, True])
 def test_fp8_mqa_logits_head_dimension_mapping(head_dim, paged):
@@ -90,6 +88,7 @@ def test_fp8_mqa_logits_head_dimension_mapping(head_dim, paged):
     check_outputs(call, reference, valid)
 
 
+@test_filter(lambda: get_arch_major() == 12)
 @pytest.mark.parametrize('batch', [33, 65])
 @pytest.mark.parametrize('varlen', [False, True])
 def test_metadata_prefix_visibility(batch, varlen):
@@ -116,3 +115,15 @@ def test_metadata_prefix_visibility(batch, varlen):
         graph.replay()
         torch.cuda.synchronize()
         assert torch.equal(captured, expected)
+
+
+if __name__ == '__main__':
+    torch.manual_seed(0)
+    random.seed(0)
+
+    for paged in (False, True):
+        for head_dim in (32, 64, 128):
+            test_fp8_mqa_logits_head_dimension_mapping(head_dim, paged)
+    for varlen in (False, True):
+        for batch in (33, 65):
+            test_metadata_prefix_visibility(batch, varlen)
