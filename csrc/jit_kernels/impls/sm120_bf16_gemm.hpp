@@ -357,7 +357,13 @@ static void sm120_bf16_k_grouped_gemm(const torch::Tensor& a,
         .tc_util = runtime->get_tc_util(), .compiled_dims = compiled_dims,
         .expected_m = m, .expected_n = n, .expected_k = max_k, .expected_num_groups = num_groups
     };
-    const auto config = get_best_config<SM120ArchSpec>(desc);
+    auto config = get_best_config<SM120ArchSpec>(desc);
+    // The vendored kernel's TMA-store epilogue writes full BLOCK_M tiles with no
+    // boundary fallback; for m % BLOCK_M != 0 a group's tail tile would spill into the
+    // next group's slab (D is one flat 2D descriptor, so TMA can only clamp at the
+    // outermost M dim). Force the group-bounded scalar store path for such shapes.
+    if (m % config.layout.block_m != 0)
+        config.storage_config.swizzle_cd_mode = 0;
 
     // Allocate tensor map buffer for dynamic replacement (A + B per SM)
     const auto num_sms = runtime->get_num_sms();

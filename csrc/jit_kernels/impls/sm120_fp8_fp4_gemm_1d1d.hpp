@@ -368,7 +368,13 @@ static void sm120_k_grouped_fp8_fp4_gemm_1d1d(const torch::Tensor& a, const torc
         .max_gran_k = std::max(gran_k_a, gran_k_b),
         .expected_m = m, .expected_n = n, .expected_k = max_k, .expected_num_groups = num_groups
     };
-    const auto config = get_best_config<SM120ArchSpec>(desc);
+    auto config = get_best_config<SM120ArchSpec>(desc);
+    // The vendored kernel's TMA-store epilogue writes full BLOCK_M tiles with no
+    // boundary fallback; for m % BLOCK_M != 0 a group's tail tile would spill into the
+    // next group's slab (D is one flat 2D descriptor, so TMA can only clamp at the
+    // outermost M dim). Force the group-bounded scalar store path for such shapes.
+    if (m % config.layout.block_m != 0)
+        config.storage_config.swizzle_cd_mode = 0;
 
     const auto& cd = d;
     const bool fp4_unpacked = !is_fp4;
