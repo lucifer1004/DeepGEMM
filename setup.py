@@ -6,6 +6,7 @@ import setuptools
 import subprocess
 import sys
 import torch
+import tvm_ffi.libinfo
 import platform
 import urllib
 import urllib.error
@@ -27,18 +28,21 @@ DG_USE_LOCAL_VERSION = int(os.getenv('DG_USE_LOCAL_VERSION', '1')) == 1
 cxx_flags = ['-std=c++20', '-O3', '-fPIC', '-Wno-psabi', '-Wno-deprecated-declarations',
              f'-D_GLIBCXX_USE_CXX11_ABI={int(torch.compiled_with_cxx11_abi())}']
 
-# Sources
+# Sources: `deep_gemm/__init__.py` loads `_C` through TVM-FFI, so build the
+# TVM-FFI API, with the libraries build_sgl_deep_gemm.sh links.
 current_dir = os.path.dirname(os.path.realpath(__file__))
-sources = ['csrc/python_api.cpp']
+sources = ['csrc/tvm_ffi_api.cpp']
 build_include_dirs = [
     f'{CUDA_HOME}/include',
     f'{CUDA_HOME}/include/cccl',
     'deep_gemm/include',
     'third-party/deep_jit/include',
     'third-party/cutlass/include',
+    *tvm_ffi.libinfo.include_paths(),
+    tvm_ffi.libinfo.find_dlpack_include_path(),
 ]
-build_libraries = ['cudart']
-build_library_dirs = [f'{CUDA_HOME}/lib64']
+build_libraries = ['cudart', 'nvrtc', 'cublasLt', 'cublas', 'tvm_ffi']
+build_library_dirs = [f'{CUDA_HOME}/lib64', os.path.dirname(tvm_ffi.libinfo.find_libtvm_ffi())]
 third_party_include_dirs = [
     'third-party/cutlass/include/cute',
     'third-party/cutlass/include/cutlass',
