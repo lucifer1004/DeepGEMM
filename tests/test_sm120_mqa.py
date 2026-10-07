@@ -118,7 +118,7 @@ def test_metadata_prefix_visibility(batch, varlen):
 
 
 @test_filter(lambda: get_arch_major() == 12)
-@pytest.mark.parametrize('page_kv', [32, 64, 128])
+@pytest.mark.parametrize('page_kv', [32, 64, 128, 256])
 @pytest.mark.parametrize('heads', [16, 32, 64])
 @pytest.mark.parametrize('next_n,varlen', [(1, False), (2, False), (3, False), (1, True)])
 @pytest.mark.parametrize('head_dim', [32, 64, 128])
@@ -126,7 +126,8 @@ def test_fp8_paged_mqa_page_geometry(page_kv, heads, next_n, varlen, head_dim):
     """Check native FP8 MMA with shuffled pages, padded strides and partial tails."""
     torch.manual_seed(17)
     lengths = [0, 1, 31, 32, 33, 63, 64, 65, 127, 128, 129, 257]
-    batch, tokens = len(lengths), 384
+    # 384 tokens do not split into 256-state pages.
+    batch, tokens = len(lengths), (512 if page_kv == 256 else 384)
     pages_per_request = tokens // page_kv
     num_pages = batch * pages_per_request
     q_cpu = torch.randint(-4, 5, (batch, next_n, heads, head_dim)).float() / 2
