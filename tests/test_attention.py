@@ -316,8 +316,9 @@ def test_paged_mqa_logits():
                 if arch_major == 10:
                     block_kvs = (64, 128, 32)
                 elif arch_major == 12:
-                    # SM120 FP4 takes 32 or 64 rows per page, FP8 only 64
-                    block_kvs = (32, 64) if fmt == 'mxfp4' else (64, )
+                    # SM120 FP4 and FP8 take 32, 64, 128 or 256 rows per page (a page
+                    # longer than 64 states is read as 64-row compute tiles)
+                    block_kvs = (32, 64, 128, 256)
                 else:
                     # SM90 pairs a 32-row page with the following one inside each 64-row compute tile
                     block_kvs = (64, 32)

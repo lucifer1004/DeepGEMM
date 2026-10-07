@@ -163,13 +163,15 @@ static torch::stable::Tensor get_paged_mqa_logits_metadata(const torch::stable::
     // Dispatch implementation. SM100 supports varlen requests only (one token per row, requests given by `indices`)
     const auto arch_major = jit->device.get_arch_major();
     if (arch_major == 12) {
-        DG_HOST_ASSERT(block_kv == 32 or block_kv == 64);
+        DG_HOST_ASSERT(block_kv == 32 or block_kv == 64 or block_kv == 128 or block_kv == 256);
         DG_HOST_ASSERT(not is_varlen or (next_n == 1 and indices.value().dim() == 1 and
                                          indices.value().size(0) == batch_size and
                                          indices.value().is_contiguous() and
                                          indices.value().scalar_type() == torch::headeronly::ScalarType::Int));
         const int next_n_atom = (is_varlen or next_n >= 2) ? 2 : 1;
-        sm120_paged_mqa_logits_metadata(context_lens, schedule_metadata, batch_size, next_n, block_kv,
+        // The kernels read a page longer than 64 states in 64-row tiles; schedule in
+        // those tiles, as a 256-state page does not divide the 128-state split.
+        sm120_paged_mqa_logits_metadata(context_lens, schedule_metadata, batch_size, next_n, std::min(block_kv, 64),
                                         num_sms, is_context_lens_2d, (next_n + next_n_atom - 1) / next_n_atom,
                                         is_varlen, is_varlen ? indices.value().mutable_data_ptr<int>() : nullptr);
     } else if (arch_major == 10) {
@@ -225,7 +227,7 @@ static torch::stable::Tensor fp8_fp4_paged_mqa_logits(const std::tuple<torch::st
     const auto [num_kv_blocks, block_kv, num_heads_kv, head_dim_with_sf] = get_shape<4>(fused_kv_cache);
     DG_HOST_ASSERT((arch_major == 10 and (block_kv == 32 or block_kv == 64 or block_kv == 128)) or
                    (arch_major == 9 and (block_kv == 32 or block_kv == 64)) or
-                   (arch_major == 12 and (block_kv == 32 or block_kv == 64)));
+                   (arch_major == 12 and (block_kv == 32 or block_kv == 64 or block_kv == 128 or block_kv == 256)));
     const int kv_head_dim = is_fp4 ? head_dim / 2 : head_dim;
     const int sf_bytes = static_cast<int>(is_mx_sf ? sizeof(int) : sizeof(float));
     DG_HOST_ASSERT(num_heads_kv == 1 and head_dim_with_sf == kv_head_dim + sf_bytes);
