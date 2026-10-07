@@ -381,14 +381,12 @@ def test_paged_mqa_logits():
                     for weights_dtype in ((torch.float, torch.bfloat16) if arch_major == 10 else (torch.float, )):
                         if weights_dtype == torch.bfloat16 and logits_dtype == torch.float:
                             continue
-                        # SM120 block_kv: FP4 takes 32 or 64, FP8 only 64 -- the `arch_major == 12`
-                        # clause of the fused-KV-cache assert in csrc/apis/attention.hpp, plus
-                        # `DG_HOST_ASSERT(block_kv == 64)` in the FP8 paged launcher
-                        # (csrc/jit_kernels/impls/sm120_mqa_logits.hpp).
+                        # SM120 reads pages longer than 64 tokens in 64-row tiles; 128-token
+                        # pages are what DeepSeek-V4.1's 128-token KV blocks give the indexer.
                         if arch_major == 10:
                             block_kvs = (128, 32, 64)
                         elif arch_major == 12:
-                            block_kvs = (32, 64) if is_mxfp4 else (64, )
+                            block_kvs = (32, 64, 128) if is_mxfp4 else (64, 128)
                         else:
                             block_kvs = (32, 64)
                         for block_kv in block_kvs:
