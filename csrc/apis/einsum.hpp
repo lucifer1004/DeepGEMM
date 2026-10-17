@@ -223,7 +223,8 @@ static void fp8_bmm(const torch::stable::Tensor& a, const torch::stable::Tensor&
                     const std::optional<torch::stable::Tensor>& c,
                     std::optional<std::tuple<int, int, int>> recipe,
                     const std::string& compiled_dims,
-                    const std::shared_ptr<EpilogueClass>& epilogue_class) {
+                    const std::shared_ptr<EpilogueClass>& epilogue_class,
+                    const bool& use_128x4_sfd_layout) {
     // The FP8 output pair and a user `FP8Quantization` are two spellings of the same epilogue
     const auto d_fp8 = std::get_if<std::pair<torch::stable::Tensor, torch::stable::Tensor>>(&d);
     const auto d_tensor = d_fp8 != nullptr ? d_fp8->first : std::get<torch::stable::Tensor>(d);
@@ -232,8 +233,9 @@ static void fp8_bmm(const torch::stable::Tensor& a, const torch::stable::Tensor&
     if (d_fp8 != nullptr) {
         DG_HOST_ASSERT(epilogue_class == nullptr and "The FP8 output pair supports no other epilogue");
         sfd = d_fp8->second;
-        merged_epilogue_class = std::make_shared<FP8QuantizationEpilogue>(d_fp8->second);
+        merged_epilogue_class = std::make_shared<FP8QuantizationEpilogue>(d_fp8->second, use_128x4_sfd_layout);
     } else {
+        DG_HOST_ASSERT(not use_128x4_sfd_layout and "The 128x4 SFD layout requires the FP8 output pair");
         sfd = merged_epilogue_class != nullptr ? merged_epilogue_class->output_sfd() : std::nullopt;
     }
 
@@ -260,7 +262,13 @@ static void fp8_bmm(const torch::stable::Tensor& a, const torch::stable::Tensor&
         //    nor a packed 4-SF word may cross a batch boundary
         DG_HOST_ASSERT(jit->device.get_arch_major() == 10);
         DG_HOST_ASSERT(d_tensor.stride(0) == n and n % 128 == 0);
-        check_sf_layout(sfd.value(), m, batch_size * n, 1, 32, std::nullopt, true, false, torch::headeronly::ScalarType::Int);
+        if (use_128x4_sfd_layout) {
+            // The 128x4 tiled layout: rows past `m` in the last tile are left unwritten
+            DG_HOST_ASSERT(sfd->scalar_type() == torch::headeronly::ScalarType::Int and sfd->is_contiguous());
+            DG_HOST_ASSERT(sfd->size(0) == ceil_div(m, 128) and sfd->size(1) == batch_size * n / 128 and sfd->size(2) == 128);
+        } else {
+            check_sf_layout(sfd.value(), m, batch_size * n, 1, 32, std::nullopt, true, false, torch::headeronly::ScalarType::Int);
+        }
     }
 
     // Early return for trivial cases
@@ -302,7 +310,8 @@ static void fp8_einsum(const std::string& expr,
                        const std::variant<torch::stable::Tensor, std::pair<torch::stable::Tensor, torch::stable::Tensor>>& d,
                        const std::optional<torch::stable::Tensor>& c,
                        const std::tuple<int, int, int>& recipe,
-                       const std::shared_ptr<EpilogueClass>& epilogue_class) {
+                       const std::shared_ptr<EpilogueClass>& epilogue_class,
+                       const bool& use_128x4_sfd_layout) {
     // Some hardcoded Einstein sum kernels
     // NOTES: only `bhr,hdr->bhd` accepts an FP8 `(d, sfd)` output pair; the other
     //        expressions take a plain BF16/FP32 D
@@ -324,7 +333,7 @@ static void fp8_einsum(const std::string& expr,
         const auto perm_c = c.has_value()
             ? std::make_optional(torch_compat::permute(c.value(), {1, 0, 2}))
             : std::nullopt;
-        fp8_bmm(perm_a, perm_sfa, b.first, b.second, perm_d, perm_c, recipe, "nk", epilogue_class);
+        fp8_bmm(perm_a, perm_sfa, b.first, b.second, perm_d, perm_c, recipe, "nk", epilogue_class, use_128x4_sfd_layout);
     } else if (expr == "bhd,hdr->bhr" and (arch_major == 10 or arch_major == 12)) {
         // (batch_size, m, n, k): (h, b, r, d)
         DG_HOST_ASSERT(std::holds_alternative<torch::stable::Tensor>(d));
@@ -338,7 +347,7 @@ static void fp8_einsum(const std::string& expr,
         const auto perm_c = c.has_value()
             ? std::make_optional(torch_compat::permute(c.value(), {1, 0, 2}))
             : std::nullopt;
-        fp8_bmm(perm_a, perm_sfa, perm_b, perm_sfb, perm_d, perm_c, recipe, "nk", epilogue_class);
+        fp8_bmm(perm_a, perm_sfa, perm_b, perm_sfb, perm_d, perm_c, recipe, "nk", epilogue_class, use_128x4_sfd_layout);
     } else if (expr == "bhd,bhr->hdr" and (arch_major == 10 or arch_major == 12)) {
         // (batch_size, m, n, k): (h, d, r, b)
         DG_HOST_ASSERT(std::holds_alternative<torch::stable::Tensor>(d));
@@ -349,7 +358,7 @@ static void fp8_einsum(const std::string& expr,
         const auto perm_b_view = torch_compat::permute(b.first, {1, 2, 0});
         const auto perm_b = arch_major == 12 ? torch::stable::contiguous(perm_b_view) : perm_b_view;
         const auto perm_sfb = torch_compat::permute(b.second, {1, 2, 0});
-        fp8_bmm(perm_a, perm_sfa, perm_b, perm_sfb, d, c, recipe, "mn", epilogue_class);
+        fp8_bmm(perm_a, perm_sfa, perm_b, perm_sfb, d, c, recipe, "mn", epilogue_class, use_128x4_sfd_layout);
     } else {
         DG_HOST_UNREACHABLE(std::format("Unsupported einsum expression: {}", expr));
     }
@@ -374,12 +383,14 @@ static void fp8_einsum(const std::string& expr,
                        const torch::stable::Tensor& d, const std::optional<torch::stable::Tensor>& c,
                        const std::vector<int64_t>& recipe,
                        const std::optional<torch::stable::Tensor>& sfd,
+                       const bool& use_128x4_sfd_layout,
                        const int64_t& epilogue_kind,
     const std::optional<double>& epilogue_alpha,
     const std::optional<torch::stable::Tensor>& epilogue_sfd) {
     std::variant<torch::stable::Tensor, std::pair<torch::stable::Tensor, torch::stable::Tensor>> output = d;
     if (sfd.has_value()) output = std::make_pair(d, *sfd);
-    einsum::fp8_einsum(expr, {a, sfa}, {b, sfb}, output, c, list_to_tuple3(recipe), epilogue_class::unwrap(epilogue_kind, epilogue_alpha, epilogue_sfd));
+    einsum::fp8_einsum(expr, {a, sfa}, {b, sfb}, output, c, list_to_tuple3(recipe),
+                       epilogue_class::unwrap(epilogue_kind, epilogue_alpha, epilogue_sfd), use_128x4_sfd_layout);
 }
 } // namespace deep_gemm::torch_registration
 
@@ -387,7 +398,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(deep_gemm, m) {
     m.def(
         "einsum(str expr, Tensor a, Tensor b, Tensor(d!) d, Tensor? c=None, int epilogue_kind=0, float? epilogue_alpha=None, Tensor? epilogue_sfd=None) -> ()");
     m.def(
-        "fp8_einsum(str expr, Tensor a, Tensor sfa, Tensor b, Tensor sfb, Tensor(d!) d, Tensor? c=None, int[3] recipe, Tensor(sfd!)? sfd=None, int epilogue_kind=0, float? epilogue_alpha=None, Tensor? epilogue_sfd=None) -> ()");
+        "fp8_einsum(str expr, Tensor a, Tensor sfa, Tensor b, Tensor sfb, Tensor(d!) d, Tensor? c=None, int[3] recipe, Tensor(sfd!)? sfd=None, bool use_128x4_sfd_layout=False, int epilogue_kind=0, float? epilogue_alpha=None, Tensor? epilogue_sfd=None) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(deep_gemm, CUDA, m) {

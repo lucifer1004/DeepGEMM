@@ -170,10 +170,10 @@ def _register_deep_gemm_kernels():
             compiled_dims, use_psum_layout, *_unpack_epilogue(epilogue),
         )
 
-    def fp8_einsum(expr, a, b, d, c=None, recipe=(1, 128, 128), epilogue=None):
+    def fp8_einsum(expr, a, b, d, c=None, recipe=(1, 128, 128), epilogue=None, use_128x4_sfd_layout=False):
         d_tensor, sfd = d if isinstance(d, (tuple, list)) else (d, None)
         return _torch_ops.fp8_einsum(
-            expr, a[0], a[1], b[0], b[1], d_tensor, c, list(recipe), sfd,
+            expr, a[0], a[1], b[0], b[1], d_tensor, c, list(recipe), sfd, use_128x4_sfd_layout,
             *_unpack_epilogue(epilogue),
         )
 

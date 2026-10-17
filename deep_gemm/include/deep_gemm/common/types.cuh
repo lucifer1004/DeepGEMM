@@ -49,6 +49,7 @@ struct EpilogueOperatorArgs {
     uint32_t sfd_stride = 0;
     uint32_t shape_m = 0, shape_n = 0;
     float alpha = 1.0f;
+    bool is_sfd_128x4 = false;
 };
 
 static constexpr uint32_t kNumDeviceLocalityDomains = 2;

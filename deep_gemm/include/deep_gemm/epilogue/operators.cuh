@@ -63,7 +63,8 @@ struct StochasticRoundToBF16: Identity {
 };
 
 // Quantize D into FP8 with dynamic per-row, per-32-column UE8M0 SFs, packed into `uint32_t`
-// words in a TMA-aligned MN-major layout (the same layout accepted for SFA)
+// words in a TMA-aligned MN-major layout (the same layout accepted for SFA), or in the
+// 128x4 tiled layout of block-scaled MMA operands (as consumed by cuBLASLt and FlashInfer)
 // NOTES: the accumulator is rounded into BF16 before the amax/scale/cast steps, so the
 //        output bitwise matches a BF16 D followed by the standalone per-token cast kernel
 struct QuantizeToFP8: Identity {
@@ -82,7 +83,10 @@ struct QuantizeToFP8: Identity {
         if (row_idx >= shape_m or group_n_idx >= shape_n)
             return;
         const auto sf_idx = (batch_idx * shape_n + group_n_idx) / kSFGranN;
-        const auto sf_word_ptr = sfd + (sf_idx / 4) * sfd_stride + row_idx;
+        // The 128x4 layout stores `(m / 128, num_words, 32, 4)` words, `sfd_stride` words per 128 rows
+        const auto sf_word_ptr = is_sfd_128x4 ?
+            sfd + (row_idx / 128) * sfd_stride + (sf_idx / 4) * 128 + (row_idx % 32) * 4 + (row_idx % 128) / 32 :
+            sfd + (sf_idx / 4) * sfd_stride + row_idx;
         if constexpr (cute::is_same_v<sf_t, uint32_t>) {
             *sf_word_ptr = sf;
         } else {

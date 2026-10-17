@@ -187,6 +187,14 @@ def test_fp8_bhr_hdr_bhd(use_ue8m0: bool = True):
                                                              gran_k=32, use_packed_ue8m0=True)
                     assert torch.equal(output.view(b, h * d), ref_fp8), f'{b=}, {h=}, {r=}, {d=}'
                     assert torch.equal(sfd.contiguous(), ref_sfd), f'{b=}, {h=}, {r=}, {d=}'
+
+                    # The 128x4 tiled SFD holds the same words as `(m / 128, num_words, 32, 4)`
+                    num_words = ceil_div(h * d, 128)
+                    sfd_128x4 = torch.empty((ceil_div(b, 128), num_words, 128), device='cuda', dtype=torch.int32)
+                    deep_gemm.fp8_einsum('bhr,hdr->bhd', x_fp8, y_fp8, (output, sfd_128x4), use_128x4_sfd_layout=True)
+                    restored_sfd = sfd_128x4.view(-1, num_words, 32, 4).permute(0, 3, 2, 1).reshape(-1, num_words)
+                    assert torch.equal(output.view(b, h * d), ref_fp8), f'{b=}, {h=}, {r=}, {d=}'
+                    assert torch.equal(restored_sfd[:b], ref_sfd), f'{b=}, {h=}, {r=}, {d=}'
                 else:
                     output = z
                     deep_gemm.fp8_einsum('bhr,hdr->bhd', x_fp8, y_fp8, output)

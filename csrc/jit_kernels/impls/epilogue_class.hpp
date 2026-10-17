@@ -67,9 +67,12 @@ public:
 
 class FP8QuantizationEpilogue final: public EpilogueClass {
     torch::stable::Tensor sfd;
+    bool is_sfd_128x4;
 
 public:
-    explicit FP8QuantizationEpilogue(const torch::stable::Tensor& sfd): sfd(sfd) {}
+    // `is_sfd_128x4` selects the `(ceil_div(m, 128), num_words, 128)` tiled SFD over the MN-major one
+    explicit FP8QuantizationEpilogue(const torch::stable::Tensor& sfd, const bool& is_sfd_128x4 = false):
+        sfd(sfd), is_sfd_128x4(is_sfd_128x4) {}
 
     std::string get_epilogue_operator_type() const override {
         return "epilogue::operators::QuantizeToFP8";
@@ -77,8 +80,9 @@ public:
 
     EpilogueOperatorArgs make_epilogue_operator_args(const int& m, const int& n) const override {
         return {.sfd = static_cast<uint32_t*>(sfd.mutable_data_ptr()),
-                .sfd_stride = static_cast<uint32_t>(sfd.stride(-1)),
-                .shape_m = static_cast<uint32_t>(m), .shape_n = static_cast<uint32_t>(n)};
+                .sfd_stride = static_cast<uint32_t>(is_sfd_128x4 ? sfd.stride(0) : sfd.stride(-1)),
+                .shape_m = static_cast<uint32_t>(m), .shape_n = static_cast<uint32_t>(n),
+                .is_sfd_128x4 = is_sfd_128x4};
     }
 
     void check(const std::optional<torch::stable::Tensor>& c, const torch::stable::Tensor& d) const override {
