@@ -16,7 +16,6 @@ from packaging.version import parse
 from pathlib import Path
 from torch.utils.cpp_extension import CUDAExtension, CUDA_HOME
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
-from scripts.generate_pyi import generate_pyi_file
 
 
 DG_SKIP_CUDA_BUILD = int(os.getenv('DG_SKIP_CUDA_BUILD', '0')) == 1
@@ -29,7 +28,7 @@ cxx_flags = ['-std=c++20', '-O3', '-fPIC', '-Wno-psabi', '-Wno-deprecated-declar
 
 # Sources
 current_dir = os.path.dirname(os.path.realpath(__file__))
-sources = ['csrc/python_api.cpp']
+sources = ['csrc/torch_library_api.cpp']
 build_include_dirs = [
     f'{CUDA_HOME}/include',
     f'{CUDA_HOME}/include/cccl',
@@ -37,7 +36,7 @@ build_include_dirs = [
     'third-party/deep_jit/include',
     'third-party/cutlass/include',
 ]
-build_libraries = ['cudart']
+build_libraries = ['cudart', 'nvrtc', 'cublasLt', 'cublas']
 build_library_dirs = [f'{CUDA_HOME}/lib64']
 third_party_include_dirs = [
     'third-party/cutlass/include/cute',
@@ -116,10 +115,7 @@ class CustomBuildPy(build_py):
         # Second, make clusters' cache setting default into `envs.py`
         self.generate_default_envs()
 
-        # Third, generate and copy .pyi file to build root directory
-        self.generate_pyi_file()
-
-        # Fourth, copy csrc and docs into the wheel for agent-side error lookup
+        # Third, copy csrc and docs into the wheel for agent-side error lookup
         self.prepare_agent_files()
 
         # Finally, run the regular build
@@ -132,18 +128,6 @@ class CustomBuildPy(build_py):
             dst = os.path.join(package_dir, name)
             shutil.rmtree(dst, ignore_errors=True)
             shutil.copytree(os.path.join(current_dir, name), dst)
-
-    def generate_pyi_file(self):
-        generate_pyi_file(name='_C', root='./csrc', output_dir='./stubs')
-        pyi_source = os.path.join(current_dir, 'stubs', '_C.pyi')
-        pyi_target = os.path.join(self.build_lib, 'deep_gemm', '_C.pyi')
-
-        if os.path.exists(pyi_source):
-            print(f"Copying .pyi file from {pyi_source} to {pyi_target}")
-            os.makedirs(os.path.dirname(pyi_target), exist_ok=True)
-            shutil.copy2(pyi_source, pyi_target)
-        else:
-            print(f"Warning: .pyi file not found at {pyi_source}")
 
     def generate_default_envs(self):
         code = '# Pre-installed environment variables\n'
